@@ -363,17 +363,25 @@ func (cl *Client) ClearExpiredInflights(now, maximumExpiry int64) []uint16 {
 // Read reads incoming packets from the connected client and transforms them into
 // packets to be handled by the packetHandler.
 func (cl *Client) Read(packetHandler ReadFn) error {
-	var err error
+	errChan := make(chan error)
 
 	for {
+		select {
+		case err := <-errChan:
+			if err != nil {
+				cl.ops.log.Warn("async error during handling of packet", "error", err)
+				return err
+			}
+		default:
+		}
+
 		if cl.Closed() {
 			return nil
 		}
 
 		cl.refreshDeadline(cl.State.Keepalive)
 		fh := new(packets.FixedHeader)
-		err = cl.ReadFixedHeader(fh)
-		if err != nil {
+		if err := cl.ReadFixedHeader(fh); err != nil {
 			return err
 		}
 
@@ -382,10 +390,15 @@ func (cl *Client) Read(packetHandler ReadFn) error {
 			return err
 		}
 
-		err = packetHandler(cl, pk) // Process inbound packet.
-		if err != nil {
-			return err
-		}
+		go func() {
+			if err := packetHandler(cl, pk); err != nil {
+				// avoid blocking the goroutine
+				select {
+				case errChan <- err:
+				default:
+				}
+			}
+		}()
 	}
 }
 
